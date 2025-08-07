@@ -58,8 +58,11 @@ submit = st.button("Process Replacement")
 client = None
 if mode == "Text to TTS":
     try:
-        client = OpenAI()
-    except Exception:
+        # Use Streamlit secrets for OpenAI API key
+        api_key = st.secrets["api_keys"]["OPENAI_API_KEY"]
+        client = OpenAI(api_key=api_key)
+    except Exception as e:
+        st.error(f"Failed to initialize OpenAI client: {e}")
         pass
 
 # Helper to parse optional final length
