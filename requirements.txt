@@ -1,13 +1,14 @@
-streamlit==1.35.0
-openai==1.35.7
-pydub==0.25.1
-librosa==0.10.2.post1
-soundfile==0.12.1
-numpy==1.26.4
-scipy==1.13.1
-pyloudnorm==0.1.1
-noisereduce==2.0.1
-pedalboard==0.8.7
-python-dotenv==1.0.1
+streamlit
+openai
+pydub
+librosa
+soundfile
+numpy
+scipy
+pyloudnorm
+noisereduce
+python-dotenv
+# Optional: pedalboard for advanced audio processing (may fail on some systems)
+# pedalboard
 # torch no longer strictly required for OpenAI TTS path
 # If later adding local ML models, install torch separately

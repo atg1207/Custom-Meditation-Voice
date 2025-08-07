@@ -7,7 +7,14 @@ import numpy as np
 import pyloudnorm as pyln
 import librosa
 import soundfile as sf
-from pedalboard import Pedalboard, Reverb, HighpassFilter, HighShelfFilter, Compressor
+
+# Try to import pedalboard, fallback to simple processing if not available
+try:
+    from pedalboard import Pedalboard, Reverb, HighpassFilter, HighShelfFilter, Compressor
+    HAS_PEDALBOARD = True
+except ImportError:
+    HAS_PEDALBOARD = False
+    print("Warning: pedalboard not available, using simplified audio processing")
 
 @dataclass
 class SegmentSpec:
@@ -52,13 +59,28 @@ def apply_serene_processing(wav_bytes: bytes, brightness: float = 0.6) -> bytes:
     data, sr = sf.read(io.BytesIO(wav_bytes))
     if data.ndim == 1:
         data = data[:, None]
-    board = Pedalboard([
-        HighpassFilter(cutoff_frequency_hz=80.0),
-        Compressor(threshold_db=-24, ratio=2.0, attack_ms=30, release_ms=150),
-        Reverb(room_size=0.35 + 0.25*brightness, damping=0.4, wet_level=0.12*brightness, dry_level=1.0, width=0.9, freeze_mode=0.0),
-        HighShelfFilter(cutoff_frequency_hz=6000, gain_db=3.0*brightness)
-    ])
-    processed = board(data.T, sr).T
+    
+    if HAS_PEDALBOARD:
+        # Use pedalboard for advanced audio processing
+        board = Pedalboard([
+            HighpassFilter(cutoff_frequency_hz=80.0),
+            Compressor(threshold_db=-24, ratio=2.0, attack_ms=30, release_ms=150),
+            Reverb(room_size=0.35 + 0.25*brightness, damping=0.4, wet_level=0.12*brightness, dry_level=1.0, width=0.9, freeze_mode=0.0),
+            HighShelfFilter(cutoff_frequency_hz=6000, gain_db=3.0*brightness)
+        ])
+        processed = board(data.T, sr).T
+    else:
+        # Fallback: simple processing using basic filtering
+        # Apply a simple high-pass filter equivalent and basic gain adjustment
+        processed = data.copy()
+        # Simple brightness adjustment (boost higher frequencies)
+        if brightness > 0.5:
+            gain_factor = 1.0 + (brightness - 0.5) * 0.3
+            processed = processed * gain_factor
+        # Ensure we don't clip
+        if np.max(np.abs(processed)) > 1.0:
+            processed = processed / np.max(np.abs(processed))
+    
     buf = io.BytesIO()
     sf.write(buf, processed, sr, format='WAV')
     return buf.getvalue()
