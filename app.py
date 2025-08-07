@@ -2,14 +2,24 @@ import streamlit as st
 import tempfile
 import os
 import io
+import subprocess
 from dotenv import load_dotenv
 from processing import (load_audiosegment, audiosegment_to_wav_bytes, compute_loudness, match_loudness,
                         apply_serene_processing, replace_segment, SegmentSpec, seconds_from_timestamp)
 from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 from openai import OpenAI
 
 # Auto-load .env
 load_dotenv()
+
+def check_ffmpeg():
+    """Check if ffmpeg is available"""
+    try:
+        subprocess.run(['ffprobe', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
 st.set_page_config(page_title="Meditation Segment Replacer", layout="centered")
 
@@ -103,16 +113,47 @@ if submit:
             if base_spec.end <= base_spec.start:
                 st.error("End must be after start.")
             else:
+                # Check if ffmpeg is available first
+                if not check_ffmpeg():
+                    st.error("⚠️ Audio processing tools are not available on this system.")
+                    st.error("This may be due to missing system dependencies (ffmpeg).")
+                    st.info("Please wait for the system to install required dependencies, or try uploading a WAV file.")
+                    st.stop()
+
                 # Load source audio
-                if uploaded_media:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_media.name)[1]) as tmp_in:
-                        tmp_in.write(uploaded_media.read())
-                        tmp_in.flush()
-                        base_audio = AudioSegment.from_file(tmp_in.name)
-                        source_name = uploaded_media.name
-                else:
-                    base_audio = AudioSegment.from_file(default_media_path)
-                    source_name = default_media_path
+                try:
+                    if uploaded_media:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_media.name)[1]) as tmp_in:
+                            tmp_in.write(uploaded_media.read())
+                            tmp_in.flush()
+                            try:
+                                base_audio = AudioSegment.from_file(tmp_in.name)
+                                source_name = uploaded_media.name
+                                st.success(f"✅ Successfully loaded: {source_name}")
+                            except CouldntDecodeError as e:
+                                st.error(f"❌ Could not decode the audio file: {str(e)}")
+                                st.info("Please try uploading a different audio format (WAV, MP3, M4A recommended)")
+                                os.unlink(tmp_in.name)  # Clean up temp file
+                                st.stop()
+                            except Exception as e:
+                                st.error(f"❌ Error loading audio file: {str(e)}")
+                                os.unlink(tmp_in.name)  # Clean up temp file
+                                st.stop()
+                    else:
+                        try:
+                            base_audio = AudioSegment.from_file(default_media_path)
+                            source_name = default_media_path
+                            st.success(f"✅ Successfully loaded: {source_name}")
+                        except CouldntDecodeError as e:
+                            st.error(f"❌ Could not decode the default audio file: {str(e)}")
+                            st.stop()
+                        except Exception as e:
+                            st.error(f"❌ Error loading default audio file: {str(e)}")
+                            st.stop()
+                except Exception as e:
+                    st.error(f"❌ Error handling audio file: {str(e)}")
+                    st.stop()
+                
                 st.write(f"Using source: {source_name}")
 
                 original_length_ms = len(base_audio)
@@ -164,7 +205,11 @@ if submit:
                         except Exception as e:
                             st.error(f"TTS request failed on line {i}: {e}")
                             st.stop()
-                        part_seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                        try:
+                            part_seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                        except Exception as e:
+                            st.error(f"Failed to process TTS audio for line {i}: {e}")
+                            st.stop()
                         combined_seg += part_seg
                         if i < len(lines) and pause_ms > 0:
                             combined_seg += AudioSegment.silent(duration=pause_ms)
@@ -174,13 +219,26 @@ if submit:
                     if not user_audio:
                         st.error("Upload replacement recording.")
                         st.stop()
-                    rep_seg = AudioSegment.from_file(io.BytesIO(user_audio.read()))
+                    try:
+                        rep_seg = AudioSegment.from_file(io.BytesIO(user_audio.read()))
+                        st.success("✅ Successfully loaded replacement audio")
+                    except CouldntDecodeError as e:
+                        st.error(f"❌ Could not decode the replacement audio file: {str(e)}")
+                        st.info("Please try uploading a different audio format (WAV, MP3, M4A recommended)")
+                        st.stop()
+                    except Exception as e:
+                        st.error(f"❌ Error loading replacement audio: {str(e)}")
+                        st.stop()
 
                 # Process replacement
-                rep_wav = audiosegment_to_wav_bytes(rep_seg)
-                rep_wav = apply_serene_processing(rep_wav, brightness=brightness)
-                rep_wav = match_loudness(orig_lufs, rep_wav)
-                rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
+                try:
+                    rep_wav = audiosegment_to_wav_bytes(rep_seg)
+                    rep_wav = apply_serene_processing(rep_wav, brightness=brightness)
+                    rep_wav = match_loudness(orig_lufs, rep_wav)
+                    rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
+                except Exception as e:
+                    st.error(f"❌ Error processing replacement audio: {str(e)}")
+                    st.stop()
 
                 # Replace with looping fill; this removes the original tail inside the extended window.
                 # After replacement, if we extended, re-append the original tail starting at base_spec.end.

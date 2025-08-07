@@ -1,6 +1,6 @@
 streamlit
 openai
-pydub
+pydub[scipy]
 librosa
 soundfile
 numpy
