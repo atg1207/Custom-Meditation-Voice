@@ -6,7 +6,7 @@ soundfile==0.12.1
 numpy==1.26.4
 scipy==1.13.1
 pyloudnorm==0.1.1
-noisereduce==3.0.1
+noisereduce==2.0.1
 pedalboard==0.8.7
 python-dotenv==1.0.1
 # torch no longer strictly required for OpenAI TTS path

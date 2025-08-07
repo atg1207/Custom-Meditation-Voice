@@ -15,15 +15,22 @@ st.set_page_config(page_title="Meditation Segment Replacer", layout="centered")
 
 st.title("Meditation Command Segment Replacer (OpenAI TTS)")
 
-# --- New: auto-detect media in current folder ---
+# --- Check if running on Streamlit Cloud or locally ---
 ALLOWED_EXT = (".mp4", ".mp3", ".wav", ".m4a")
-folder_media = [f for f in os.listdir(os.getcwd()) if f.lower().endswith(ALLOWED_EXT)]
-folder_media.sort()
-default_media_path = folder_media[0] if folder_media else None
-if default_media_path:
-    st.info(f"Auto-detected default media: {default_media_path} (used if you do not upload another file)")
-else:
-    st.warning("No media file found in folder; please upload one.")
+
+# Try to detect local media files, but don't fail if none found
+try:
+    folder_media = [f for f in os.listdir(os.getcwd()) if f.lower().endswith(ALLOWED_EXT)]
+    folder_media.sort()
+    default_media_path = folder_media[0] if folder_media else None
+    if default_media_path:
+        st.info(f"Auto-detected default media: {default_media_path} (used if you do not upload another file)")
+    else:
+        st.info("Please upload a media file to get started.")
+except:
+    # Running on Streamlit Cloud or restricted environment
+    default_media_path = None
+    st.info("Please upload a media file to get started.")
 
 st.markdown("""
 Specify the segment to replace. If your generated or uploaded replacement audio is shorter than the (possibly extended) window, it will be looped seamlessly to fill only that window. The rest of the audio before and after stays untouched. If you request a longer final total duration, only the replacement window is expanded (end point moves later) to achieve the total duration.
@@ -37,7 +44,9 @@ with st.expander("TTS Settings", expanded=False):
     loudness_target = st.slider("Fallback Loudness target (LUFS)", -30, -10, -16)
     line_pause = st.slider("Pause between script lines (seconds)", 0.0, 5.0, 0.7, 0.1)
 
-uploaded_media = st.file_uploader("(Optional) Upload video/audio to override default", type=["mp4", "mp3", "wav", "m4a"])
+# Update file upload text based on whether local files are available
+upload_label = "Upload video/audio file" if not default_media_path else "(Optional) Upload video/audio to override default"
+uploaded_media = st.file_uploader(upload_label, type=["mp4", "mp3", "wav", "m4a"])
 col1, col2, col3 = st.columns(3)
 start_ts = col1.text_input("Replace Start (HH:MM:SS)", value="00:16:05")
 end_ts = col2.text_input("Replace End (HH:MM:SS)", value="00:20:03")
@@ -58,8 +67,18 @@ submit = st.button("Process Replacement")
 client = None
 if mode == "Text to TTS":
     try:
-        # Use Streamlit secrets for OpenAI API key
-        api_key = st.secrets["api_keys"]["OPENAI_API_KEY"]
+        # Try Streamlit secrets first, fallback to environment variables for local development
+        try:
+            api_key = st.secrets["api_keys"]["OPENAI_API_KEY"]
+            if api_key == "your-api-key-here":
+                raise KeyError("Placeholder API key found")
+        except KeyError:
+            # Fallback to environment variables for local development
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                st.error("OpenAI API key not found. Please add it to Streamlit Cloud secrets or your .env file.")
+                st.stop()
+        
         client = OpenAI(api_key=api_key)
     except Exception as e:
         st.error(f"Failed to initialize OpenAI client: {e}")
