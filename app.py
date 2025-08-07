@@ -30,7 +30,7 @@ Specify the segment to replace. If your generated or uploaded replacement audio 
 """)
 
 with st.expander("TTS Settings", expanded=False):
-    voice = st.selectbox("Voice", ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"], index=3)
+    voice = st.selectbox("Voice", ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"], index=1)
     instructions = st.text_area("Voice Instructions (style prompt)", value="Speak slowly, serene, calm, gentle, soothing, with soft warmth and subtle air.", height=80)
     brightness = st.slider("Serene brightness (post EQ/reverb)", 0.0, 1.0, 0.6, 0.05)
     crossfade_ms = st.slider("Crossfade (ms)", 50, 1000, 300, 10)
