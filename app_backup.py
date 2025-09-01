@@ -9,9 +9,26 @@ from processing import (load_audiosegment, audiosegment_to_wav_bytes, compute_lo
 from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 from openai import OpenAI
+from audio_analysis import (
+    extract_segment_audio, analyze_voice_characteristics, 
+    match_voice_profile, extract_ambience, blend_with_ambience,
+    apply_de_esser
+)
+from preview_mixer import (
+    PreviewMixer, MusicLibrary, create_preview_ui, 
+    create_music_mixer_ui
+)
+import numpy as np
+import soundfile as sf
 
 # Auto-load .env
 load_dotenv()
+
+# Initialize preview mixer and music library
+if 'preview_mixer' not in st.session_state:
+    st.session_state.preview_mixer = PreviewMixer()
+if 'music_library' not in st.session_state:
+    st.session_state.music_library = MusicLibrary()
 
 def check_ffmpeg():
     """Check if ffmpeg is available"""
@@ -49,7 +66,7 @@ Specify the segment to replace. If your generated or uploaded replacement audio 
 with st.expander("TTS Settings", expanded=False):
     voice = st.selectbox("Voice", ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"], index=1)
     instructions = st.text_area("Voice Instructions (style prompt)", 
-                               value="Speak in an extremely soft, gentle, and soothing voice. Use a warm, calm, serene tone with a slow, meditative pace. Sound divine and ethereal, as if speaking from a peaceful dream. Avoid any harshness or sharp sounds.", 
+                               value="Speak in an extremely soft, gentle, and soothing whisper. Use a warm, calm, serene tone with a slow, meditative pace. Sound divine and ethereal, as if speaking from a peaceful dream. Avoid any harshness or sharp sounds.", 
                                height=80)
     
     col1, col2 = st.columns(2)
@@ -58,8 +75,30 @@ with st.expander("TTS Settings", expanded=False):
         brightness = st.slider("Serene brightness (post EQ/reverb)", 0.0, 1.0, 0.6, 0.05)
         crossfade_ms = st.slider("Crossfade (ms)", 50, 1000, 300, 10)
     with col2:
+        auto_analyze = st.checkbox("🎯 Auto-Analyze Original", value=True, help="Automatically analyze and match the original segment's characteristics")
         loudness_target = st.slider("Fallback Loudness target (LUFS)", -30, -10, -16)
         line_pause = st.slider("Pause between script lines (seconds)", 0.0, 5.0, 0.7, 0.1)
+
+# Voice Matching Settings
+with st.expander("Voice Matching (Advanced)", expanded=False):
+    enable_voice_matching = st.checkbox("Enable Voice Profile Matching", value=False, 
+                                       help="Analyze and match the voice characteristics of the original segment")
+    if enable_voice_matching:
+        col1, col2 = st.columns(2)
+        with col1:
+            match_pitch = st.checkbox("Match Pitch", value=True)
+            match_tempo = st.checkbox("Match Speaking Rate", value=True)
+            match_timbre = st.checkbox("Match Timbre/Brightness", value=True)
+        with col2:
+            match_dynamics = st.checkbox("Match Dynamic Range", value=True)
+            match_reverb = st.checkbox("Match Room Acoustics", value=False)
+            preserve_ambience = st.checkbox("Preserve Background Ambience", value=True)
+
+# Preview Settings
+preview_settings = create_preview_ui(st.session_state.preview_mixer)
+
+# Music Mixing Settings  
+music_settings = create_music_mixer_ui(st.session_state.music_library)
 
 # Update file upload text based on whether local files are available
 upload_label = "Upload video/audio file" if not default_media_path else "(Optional) Upload video/audio to override default"
@@ -80,11 +119,15 @@ else:
     user_audio = st.file_uploader("Upload replacement audio (wav/mp3)", type=["wav", "mp3", "m4a"])
 
 # Preview and Process buttons
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     preview_btn = st.button("🎧 Preview", type="secondary", help="Preview the replacement before processing")
 with col2:
     submit = st.button("⚡ Process Replacement", type="primary")
+with col3:
+    if st.button("🔄 Reset", type="secondary"):
+        st.session_state.clear()
+        st.rerun()
 
 client = None
 if mode == "Text to TTS":
@@ -116,83 +159,6 @@ def parse_optional_duration(val: str):
         st.warning("Could not parse target total length; using original length.")
         return None
 
-# Helper function to generate TTS for all lines
-def generate_tts_audio(client, lines, voice, instructions, line_pause):
-    """Generate TTS audio for all lines with pauses"""
-    combined_seg = AudioSegment.silent(duration=0)
-    pause_ms = int(line_pause * 1000)
-    
-    progress = st.progress(0.0)
-    for i, line in enumerate(lines, start=1):
-        try:
-            resp = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice=voice,
-                input=line,
-                instructions=instructions,
-            )
-            audio_bytes = resp.read() if hasattr(resp, 'read') else resp.content
-        except Exception as e:
-            st.error(f"TTS request failed on line {i}: {e}")
-            st.stop()
-        try:
-            part_seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
-        except Exception as e:
-            st.error(f"Failed to process TTS audio for line {i}: {e}")
-            st.stop()
-        combined_seg += part_seg
-        if i < len(lines) and pause_ms > 0:
-            combined_seg += AudioSegment.silent(duration=pause_ms)
-        progress.progress(i / len(lines))
-    
-    return combined_seg
-
-# Helper function to create preview
-def create_preview(base_audio, replacement_audio, start_ms, end_ms, crossfade_ms, preview_duration_ms=10000):
-    """Create a short preview of the replacement"""
-    # Calculate preview window
-    preview_start = max(0, start_ms - 2000)  # 2 seconds before
-    preview_end = min(len(base_audio), end_ms + 2000)  # 2 seconds after
-    
-    # Limit preview duration
-    if preview_end - preview_start > preview_duration_ms:
-        preview_end = preview_start + preview_duration_ms
-    
-    # Extract preview segment from base
-    preview_base = base_audio[preview_start:preview_end]
-    
-    # Calculate relative positions in preview
-    rel_start = start_ms - preview_start
-    rel_end = end_ms - preview_start
-    
-    # Create preview with replacement
-    pre_segment = preview_base[:rel_start]
-    post_segment = preview_base[rel_end:]
-    
-    # Trim or loop replacement to fit
-    window_len = rel_end - rel_start
-    if len(replacement_audio) < window_len:
-        # Loop to fill
-        loops_needed = window_len // len(replacement_audio) + 1
-        replacement_preview = (replacement_audio * loops_needed)[:window_len]
-    else:
-        replacement_preview = replacement_audio[:window_len]
-    
-    # Apply crossfade
-    if crossfade_ms > 0 and len(pre_segment) > 0 and len(replacement_preview) > 0:
-        cf = min(crossfade_ms, len(pre_segment), len(replacement_preview))
-        preview = pre_segment.append(replacement_preview, crossfade=cf)
-    else:
-        preview = pre_segment + replacement_preview
-        
-    if len(post_segment) > 0 and crossfade_ms > 0:
-        cf = min(crossfade_ms, len(preview), len(post_segment))
-        preview = preview.append(post_segment, crossfade=cf)
-    else:
-        preview = preview + post_segment
-    
-    return preview
-
 # Handle Preview Button
 if preview_btn:
     if not uploaded_media and not default_media_path:
@@ -215,17 +181,37 @@ if preview_btn:
             if base_spec.end <= base_spec.start:
                 st.error("End must be after start.")
             else:
-                # Generate or load replacement audio for preview
+                # Generate or load replacement audio (simplified for preview)
                 if mode == "Text to TTS":
                     if not text_input or len(text_input.strip()) == 0:
                         st.error("Enter script text for preview.")
                     elif client is None:
                         st.error("OpenAI client not initialized.")
                     else:
+                        # Generate all lines for preview
                         lines = [ln.strip() for ln in text_input.splitlines() if ln.strip()]
                         if lines:
                             st.info(f"Generating preview with {len(lines)} line(s)...")
-                            rep_seg = generate_tts_audio(client, lines, voice, instructions, line_pause)
+                            combined_seg = AudioSegment.silent(duration=0)
+                            pause_ms = int(line_pause * 1000)
+                            
+                            # Generate TTS for all lines
+                            for i, line in enumerate(lines, start=1):
+                                resp = client.audio.speech.create(
+                                    model="gpt-4o-mini-tts",
+                                    voice=voice,
+                                    input=line,
+                                    instructions=instructions,
+                                )
+                                audio_bytes = resp.read() if hasattr(resp, 'read') else resp.content
+                                part_seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                                combined_seg += part_seg
+                                
+                                # Add pause between lines
+                                if i < len(lines) and pause_ms > 0:
+                                    combined_seg += AudioSegment.silent(duration=pause_ms)
+                            
+                            rep_seg = combined_seg
                             
                             # Apply divine mode processing to preview
                             if divine_mode:
@@ -234,13 +220,13 @@ if preview_btn:
                                 rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
                             
                             # Create preview
-                            preview_audio = create_preview(
+                            preview_audio = st.session_state.preview_mixer.create_preview(
                                 base_audio,
                                 rep_seg,
                                 int(base_spec.start * 1000),
                                 int(base_spec.end * 1000),
                                 crossfade_ms,
-                                10000  # 10 second preview
+                                preview_settings['duration']
                             )
                             
                             # Export preview
@@ -250,26 +236,41 @@ if preview_btn:
                             
                             st.success("Preview ready!")
                             st.audio(preview_buf, format='audio/mp3')
+                            
+                            if preview_settings['comparison_mode']:
+                                # Create before/after comparison
+                                orig_preview, _ = st.session_state.preview_mixer.create_comparison_preview(
+                                    base_audio,
+                                    base_audio,  # Using original for now
+                                    int(base_spec.start * 1000),
+                                    preview_settings['duration']
+                                )
+                                
+                                orig_buf = io.BytesIO()
+                                orig_preview.export(orig_buf, format='mp3')
+                                orig_buf.seek(0)
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write("**Original**")
+                                    st.audio(orig_buf, format='audio/mp3')
+                                with col2:
+                                    st.write("**With Replacement**")
+                                    st.audio(preview_buf, format='audio/mp3')
                 else:
                     if not user_audio:
                         st.error("Upload replacement audio for preview.")
                     else:
                         rep_seg = AudioSegment.from_file(io.BytesIO(user_audio.read()))
                         
-                        # Apply divine mode processing if enabled
-                        if divine_mode:
-                            rep_wav = audiosegment_to_wav_bytes(rep_seg)
-                            rep_wav = apply_serene_processing(rep_wav, brightness=brightness, divine_mode=divine_mode)
-                            rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
-                        
                         # Create preview
-                        preview_audio = create_preview(
+                        preview_audio = st.session_state.preview_mixer.create_preview(
                             base_audio,
                             rep_seg,
                             int(base_spec.start * 1000),
                             int(base_spec.end * 1000),
                             crossfade_ms,
-                            10000  # 10 second preview
+                            preview_settings['duration']
                         )
                         
                         preview_buf = io.BytesIO()
@@ -346,6 +347,9 @@ if submit:
                 st.write(f"Original integrated loudness (approx): {orig_lufs:.2f} LUFS")
 
                 # Determine extended spec if needed.
+                # We only extend the replacement window forward, but we must keep the original tail after the
+                # original window end so that base tail content is preserved. We will first build a temp result
+                # then re-append the original tail if we extended.
                 target_total = parse_optional_duration(final_len_input)
                 extend_seconds = 0.0
                 if target_total and target_total > original_length_sec:
@@ -365,7 +369,31 @@ if submit:
                         st.error("Script has no usable lines.")
                         st.stop()
                     st.info(f"Generating {len(lines)} line(s) of TTS with {line_pause:.1f}s pauses…")
-                    rep_seg = generate_tts_audio(client, lines, voice, instructions, line_pause)
+                    combined_seg = AudioSegment.silent(duration=0)
+                    pause_ms = int(line_pause * 1000)
+                    progress = st.progress(0.0)
+                    for i, line in enumerate(lines, start=1):
+                        try:
+                            resp = client.audio.speech.create(
+                                model="gpt-4o-mini-tts",
+                                voice=voice,
+                                input=line,
+                                instructions=instructions,
+                            )
+                            audio_bytes = resp.read() if hasattr(resp, 'read') else resp.content
+                        except Exception as e:
+                            st.error(f"TTS request failed on line {i}: {e}")
+                            st.stop()
+                        try:
+                            part_seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+                        except Exception as e:
+                            st.error(f"Failed to process TTS audio for line {i}: {e}")
+                            st.stop()
+                        combined_seg += part_seg
+                        if i < len(lines) and pause_ms > 0:
+                            combined_seg += AudioSegment.silent(duration=pause_ms)
+                        progress.progress(i / len(lines))
+                    rep_seg = combined_seg
                 else:
                     if not user_audio:
                         st.error("Upload replacement recording.")
@@ -381,9 +409,80 @@ if submit:
                         st.error(f"❌ Error loading replacement audio: {str(e)}")
                         st.stop()
 
+                # Auto-analyze original segment if enabled
+                extracted_music = None
+                if auto_analyze or enable_voice_matching:
+                    st.info("🔍 Analyzing original segment characteristics...")
+                    
+                    # Extract and analyze original segment
+                    orig_start_ms = int(base_spec.start * 1000)
+                    orig_end_ms = int(base_spec.end * 1000)
+                    orig_audio_np, orig_sr = extract_segment_audio(base_audio, orig_start_ms, orig_end_ms)
+                    
+                    # Analyze original voice profile
+                    original_profile = analyze_voice_characteristics(orig_audio_np, orig_sr)
+                    
+                    # Extract background music/ambience
+                    st.info("🎵 Extracting background music from original segment...")
+                    extracted_music = st.session_state.preview_mixer.extract_music_from_original(
+                        base_audio,
+                        orig_start_ms,
+                        orig_end_ms
+                    )
+                    
+                    # Display analysis
+                    with st.expander("📊 Original Segment Analysis", expanded=True):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Pitch", f"{original_profile.pitch_mean:.0f} Hz")
+                            st.metric("Tempo", f"{original_profile.tempo:.0f} BPM")
+                        with col2:
+                            st.metric("Brightness", f"{original_profile.spectral_centroid:.0f} Hz")
+                            st.metric("Dynamic Range", f"{original_profile.dynamic_range:.1f} dB")
+                        with col3:
+                            st.metric("Reverb Size", f"{original_profile.reverb_profile['room_size']:.2f}")
+                            st.metric("Noise Floor", f"{original_profile.noise_floor:.1f} dB")
+                        
+                        st.info("✅ Background music extracted and will be automatically mixed with replacement")
+                
                 # Process replacement
                 try:
                     rep_wav = audiosegment_to_wav_bytes(rep_seg)
+                    
+                    # Apply voice matching if enabled
+                    if enable_voice_matching:
+                        rep_data, rep_sr = sf.read(io.BytesIO(rep_wav))
+                        if rep_data.ndim > 1:
+                            rep_data = rep_data.mean(axis=1)
+                        
+                        # Apply matching based on selected options
+                        if any([match_pitch, match_tempo, match_timbre, match_dynamics]):
+                            rep_data = match_voice_profile(rep_data, rep_sr, original_profile)
+                        
+                        # Extract and blend ambience if requested
+                        if preserve_ambience:
+                            ambience = extract_ambience(orig_audio_np, orig_sr)
+                            rep_data = blend_with_ambience(rep_data, ambience, mix_level=0.2)
+                        
+                        # Convert back to wav bytes
+                        buf = io.BytesIO()
+                        sf.write(buf, rep_data, rep_sr, format='WAV')
+                        rep_wav = buf.getvalue()
+                    
+                    # Always apply de-essing to reduce harshness
+                    rep_data, rep_sr = sf.read(io.BytesIO(rep_wav))
+                    if rep_data.ndim > 1:
+                        rep_data = rep_data.mean(axis=1)
+                    
+                    # Apply de-esser to reduce sibilance
+                    rep_data = apply_de_esser(rep_data, rep_sr, threshold=0.6)
+                    
+                    # Convert back to wav bytes
+                    buf = io.BytesIO()
+                    sf.write(buf, rep_data, rep_sr, format='WAV')
+                    rep_wav = buf.getvalue()
+                    
+                    # Apply standard processing with divine mode
                     rep_wav = apply_serene_processing(rep_wav, brightness=brightness, divine_mode=divine_mode)
                     rep_wav = match_loudness(orig_lufs, rep_wav)
                     rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
@@ -391,17 +490,70 @@ if submit:
                     st.error(f"❌ Error processing replacement audio: {str(e)}")
                     st.stop()
 
-                # Replace with looping fill
+                # Replace with looping fill; this removes the original tail inside the extended window.
+                # After replacement, if we extended, re-append the original tail starting at base_spec.end.
                 result_audio = replace_segment(base_audio, rep_seg, spec, crossfade_ms=crossfade_ms)
                 if extend_seconds > 0:
                     # Original tail starts at the original base_spec.end timestamp
                     tail_start_ms = int(base_spec.end * 1000)
                     tail = base_audio[tail_start_ms:]
                     result_audio = result_audio + tail
-                    # If tail pushes us beyond target, trim
+                    # If tail pushes us beyond target (should not unless timing rounding), trim
                     target_ms_total = int(target_total * 1000)
                     if len(result_audio) > target_ms_total:
                         result_audio = result_audio[:target_ms_total]
+                
+                # Apply background music mixing (auto-use extracted music if available)
+                if music_settings['enabled'] or extracted_music:
+                    st.info("🎶 Mixing with background music...")
+                    
+                    music_audio = None
+                    
+                    # Use extracted music if available and no other source specified
+                    if extracted_music and (not music_settings['enabled'] or music_settings['source'] == 'Extract from original'):
+                        music_audio = extracted_music
+                    elif music_settings['source'] == 'Extract from original' and not extracted_music:
+                        # Extract music/ambience from original if not already done
+                        music_audio = st.session_state.preview_mixer.extract_music_from_original(
+                            base_audio, 
+                            int(base_spec.start * 1000),
+                            int(base_spec.end * 1000)
+                        )
+                    elif music_settings['source'] == 'Upload custom' and 'music_upload' in st.session_state:
+                        # Use uploaded music
+                        try:
+                            music_file = st.session_state.get('music_upload')
+                            if music_file:
+                                music_audio = AudioSegment.from_file(io.BytesIO(music_file.read()))
+                        except Exception as e:
+                            st.warning(f"Could not load music file: {e}")
+                    elif music_settings['source'] == 'Use library':
+                        # Get from library
+                        selected = st.session_state.get('selected_track')
+                        if selected:
+                            music_audio = st.session_state.music_library.get_track(selected)
+                    
+                    if music_audio:
+                        # Apply fades to music
+                        if music_settings.get('fade_in', 0) > 0:
+                            music_audio = music_audio.fade_in(music_settings['fade_in'])
+                        if music_settings.get('fade_out', 0) > 0:
+                            music_audio = music_audio.fade_out(music_settings['fade_out'])
+                        
+                        # Mix with the result - use higher volume for extracted music
+                        music_vol = 0.5 if extracted_music else music_settings.get('volume', 0.3)
+                        
+                        # Mix with the result
+                        result_audio = st.session_state.preview_mixer.mix_with_background_music(
+                            result_audio,
+                            music_audio,
+                            music_volume=music_vol,
+                            ducking_enabled=music_settings.get('ducking', {}).get('enabled', True),
+                            ducking_threshold=music_settings.get('ducking', {}).get('threshold', -20),
+                            ducking_ratio=music_settings.get('ducking', {}).get('amount', 0.5)  # Less aggressive ducking
+                        )
+                        
+                        st.success("✅ Background music mixed successfully")
 
                 final_len_sec = len(result_audio) / 1000.0
                 st.write(f"Final output length: {final_len_sec/60:.2f} minutes")

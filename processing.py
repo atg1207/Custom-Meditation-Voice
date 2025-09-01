@@ -55,31 +55,75 @@ def match_loudness(target_lufs: float, wav_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def apply_serene_processing(wav_bytes: bytes, brightness: float = 0.6) -> bytes:
+def apply_serene_processing(wav_bytes: bytes, brightness: float = 0.6, divine_mode: bool = False) -> bytes:
     data, sr = sf.read(io.BytesIO(wav_bytes))
     if data.ndim == 1:
         data = data[:, None]
     
     if HAS_PEDALBOARD:
         # Use pedalboard for advanced audio processing
-        board = Pedalboard([
-            HighpassFilter(cutoff_frequency_hz=80.0),
-            Compressor(threshold_db=-24, ratio=2.0, attack_ms=30, release_ms=150),
-            Reverb(room_size=0.35 + 0.25*brightness, damping=0.4, wet_level=0.12*brightness, dry_level=1.0, width=0.9, freeze_mode=0.0),
-            HighShelfFilter(cutoff_frequency_hz=6000, gain_db=3.0*brightness)
-        ])
+        if divine_mode:
+            # Divine/ethereal mode with smooth, warm processing
+            from pedalboard import Delay, Chorus, LowShelfFilter
+            board = Pedalboard([
+                # Gentle high-pass to preserve warmth
+                HighpassFilter(cutoff_frequency_hz=40.0),  
+                # Low-shelf to add warmth and reduce harshness
+                LowShelfFilter(cutoff_frequency_hz=200.0, gain_db=2.0),
+                # Gentle compression for smooth dynamics
+                Compressor(threshold_db=-18, ratio=2.5, attack_ms=50, release_ms=300),
+                # First reverb layer - intimate room ambience
+                Reverb(room_size=0.55, damping=0.45, wet_level=0.18, dry_level=0.95, width=0.8, freeze_mode=0.0),
+                # Very subtle chorus for ethereal quality
+                Chorus(rate_hz=0.2, depth=0.08, centre_delay_ms=5.0, feedback=0.05, mix=0.1),
+                # Softer echo/delay for divine effect
+                Delay(delay_seconds=0.12, feedback=0.15, mix=0.12),
+                # Second reverb layer - gentle hall reverb
+                Reverb(room_size=0.75, damping=0.35, wet_level=0.1, dry_level=1.0, width=0.9, freeze_mode=0.0),
+                # Reduce high frequencies to prevent harshness
+                HighShelfFilter(cutoff_frequency_hz=5000, gain_db=-2.0),
+                # Final warmth enhancement
+                LowShelfFilter(cutoff_frequency_hz=400.0, gain_db=1.5)
+            ])
+        else:
+            # Standard serene processing
+            board = Pedalboard([
+                HighpassFilter(cutoff_frequency_hz=80.0),
+                Compressor(threshold_db=-24, ratio=2.0, attack_ms=30, release_ms=150),
+                Reverb(room_size=0.35 + 0.25*brightness, damping=0.4, wet_level=0.12*brightness, dry_level=1.0, width=0.9, freeze_mode=0.0),
+                HighShelfFilter(cutoff_frequency_hz=6000, gain_db=3.0*brightness)
+            ])
         processed = board(data.T, sr).T
     else:
-        # Fallback: simple processing using basic filtering
-        # Apply a simple high-pass filter equivalent and basic gain adjustment
+        # Fallback: enhanced processing with echo simulation
         processed = data.copy()
-        # Simple brightness adjustment (boost higher frequencies)
+        
+        if divine_mode:
+            # Simple echo effect without pedalboard
+            delay_samples = int(0.15 * sr)  # 150ms delay
+            echo_gain = 0.25
+            
+            # Create echo by adding delayed copy
+            if len(processed) > delay_samples:
+                echo = np.zeros_like(processed)
+                echo[delay_samples:] = processed[:-delay_samples] * echo_gain
+                processed = processed + echo
+                
+                # Second echo layer
+                delay_samples2 = int(0.3 * sr)  # 300ms delay
+                if len(processed) > delay_samples2:
+                    echo2 = np.zeros_like(processed)
+                    echo2[delay_samples2:] = processed[:-delay_samples2] * echo_gain * 0.5
+                    processed = processed + echo2
+        
+        # Simple brightness adjustment
         if brightness > 0.5:
             gain_factor = 1.0 + (brightness - 0.5) * 0.3
             processed = processed * gain_factor
+        
         # Ensure we don't clip
         if np.max(np.abs(processed)) > 1.0:
-            processed = processed / np.max(np.abs(processed))
+            processed = processed / np.max(np.abs(processed)) * 0.95
     
     buf = io.BytesIO()
     sf.write(buf, processed, sr, format='WAV')
