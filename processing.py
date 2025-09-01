@@ -171,6 +171,32 @@ def replace_segment(base: AudioSegment, replacement: AudioSegment, spec: Segment
     return combined
 
 
+def mix_background_audio(main_audio: AudioSegment, background_path: str, background_volume: float = 0.3, main_volume: float = 1.0) -> AudioSegment:
+    """Mix background audio with main audio, looping background to match main audio length."""
+    try:
+        # Load background audio
+        background = AudioSegment.from_file(background_path)
+        
+        # Loop background audio to match main audio length
+        background_looped = loop_to_duration(background, len(main_audio))
+        
+        # Adjust volumes (0.0 to 1.0)
+        background_looped = background_looped - (20 * (1 - background_volume))  # Convert to dB
+        main_adjusted = main_audio - (20 * (1 - main_volume))  # Adjust main audio volume too
+        
+        # Mix the audio segments
+        mixed = main_adjusted.overlay(background_looped)
+        
+        return mixed
+    except Exception as e:
+        print(f"Warning: Could not mix background audio: {e}")
+        # Still apply main volume adjustment even if background mixing fails
+        try:
+            return main_audio - (20 * (1 - main_volume))
+        except:
+            return main_audio
+
+
 def seconds_from_timestamp(ts: str) -> float:
     # Format: HH:MM:SS(.ms)
     parts = ts.split(':')

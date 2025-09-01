@@ -5,7 +5,7 @@ import io
 import subprocess
 from dotenv import load_dotenv
 from processing import (load_audiosegment, audiosegment_to_wav_bytes, compute_loudness, match_loudness,
-                        apply_serene_processing, replace_segment, SegmentSpec, seconds_from_timestamp)
+                        apply_serene_processing, replace_segment, SegmentSpec, seconds_from_timestamp, mix_background_audio)
 from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 from openai import OpenAI
@@ -31,8 +31,12 @@ ALLOWED_EXT = (".mp4", ".mp3", ".wav", ".m4a")
 # Try to detect local media files, but don't fail if none found
 try:
     folder_media = [f for f in os.listdir(os.getcwd()) if f.lower().endswith(ALLOWED_EXT)]
-    folder_media.sort()
-    default_media_path = folder_media[0] if folder_media else None
+    # Prioritize "The hyno guy.mp4" as default, fallback to alphabetical sort
+    if "The hyno guy.mp4" in folder_media:
+        default_media_path = "The hyno guy.mp4"
+    else:
+        folder_media.sort()
+        default_media_path = folder_media[0] if folder_media else None
     if default_media_path:
         st.info(f"Auto-detected default media: {default_media_path} (used if you do not upload another file)")
     else:
@@ -55,11 +59,16 @@ with st.expander("TTS Settings", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
         divine_mode = st.checkbox("✨ Divine Mode", value=True, help="Adds ethereal echo and reverb for a divine, spiritual quality")
-        brightness = st.slider("Serene brightness (post EQ/reverb)", 0.0, 1.0, 0.6, 0.05)
+        brightness = st.slider("Serene brightness (post EQ/reverb)", 0.0, 1.0, 0.0, 0.05)
         crossfade_ms = st.slider("Crossfade (ms)", 50, 1000, 300, 10)
+        # Background audio controls
+        background_audio_enabled = st.checkbox("🎵 Add Background Audio", value=True, help="Mix Background Audio.mp3 with generated TTS")
     with col2:
         loudness_target = st.slider("Fallback Loudness target (LUFS)", -30, -10, -16)
         line_pause = st.slider("Pause between script lines (seconds)", 0.0, 5.0, 0.7, 0.1)
+        # Volume controls
+        background_volume = st.slider("Background Audio Volume", 0.0, 1.0, 0.7, 0.05, help="Volume of background audio (0=silent, 1=full)")
+        custom_audio_volume = st.slider("Custom Audio Volume", 0.0, 1.0, 1.0, 0.05, help="Volume of TTS/custom audio (0=silent, 1=full)")
 
 # Update file upload text based on whether local files are available
 upload_label = "Upload video/audio file" if not default_media_path else "(Optional) Upload video/audio to override default"
@@ -233,6 +242,10 @@ if preview_btn:
                                 rep_wav = apply_serene_processing(rep_wav, brightness=brightness, divine_mode=divine_mode)
                                 rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
                             
+                            # Apply background audio mixing if enabled
+                            if background_audio_enabled and os.path.exists("Background Audio.mp3"):
+                                rep_seg = mix_background_audio(rep_seg, "Background Audio.mp3", background_volume, custom_audio_volume)
+                            
                             # Create preview
                             preview_audio = create_preview(
                                 base_audio,
@@ -261,6 +274,10 @@ if preview_btn:
                             rep_wav = audiosegment_to_wav_bytes(rep_seg)
                             rep_wav = apply_serene_processing(rep_wav, brightness=brightness, divine_mode=divine_mode)
                             rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
+                        
+                        # Apply background audio mixing if enabled
+                        if background_audio_enabled and os.path.exists("Background Audio.mp3"):
+                            rep_seg = mix_background_audio(rep_seg, "Background Audio.mp3", background_volume, custom_audio_volume)
                         
                         # Create preview
                         preview_audio = create_preview(
@@ -387,6 +404,11 @@ if submit:
                     rep_wav = apply_serene_processing(rep_wav, brightness=brightness, divine_mode=divine_mode)
                     rep_wav = match_loudness(orig_lufs, rep_wav)
                     rep_seg = AudioSegment.from_file(io.BytesIO(rep_wav))
+                    
+                    # Apply background audio mixing if enabled (only for TTS mode)
+                    if mode == "Text to TTS" and background_audio_enabled and os.path.exists("Background Audio.mp3"):
+                        rep_seg = mix_background_audio(rep_seg, "Background Audio.mp3", background_volume, custom_audio_volume)
+                        
                 except Exception as e:
                     st.error(f"❌ Error processing replacement audio: {str(e)}")
                     st.stop()
