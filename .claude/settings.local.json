@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(del audio_analysis.py preview_mixer.py)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
